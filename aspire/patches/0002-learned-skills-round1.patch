@@ -1,0 +1,170 @@
+diff --git a/.claude/skills/iterative-debugging/skills/grasp.md b/.claude/skills/iterative-debugging/skills/grasp.md
+index 4704dfe..6ad5111 100644
+--- a/.claude/skills/iterative-debugging/skills/grasp.md
++++ b/.claude/skills/iterative-debugging/skills/grasp.md
+@@ -170,6 +170,13 @@ For `solve_ik`, PyRoki or cuRobo are usually needed.
+ so a program never applies it. Treating the target as the wrist and adding your own offset puts
+ the grip 10 cm off.
+ 
++On **yam_real** the jaw contact extends at least 6.5 mm **below** the public EE point. Size the
++grasp depth from the object's own height step: on a hubbed gear (hub 22.5 mm above the teeth) a
++TCP 16 mm below the hub top closed on the teeth; 10 mm grasped the hub. Check the jaw width after
++`close_gripper()` against the width of an earlier grasp of the same object.
++*(yam_real/gear_assembly/task_0, 2026-10-19: 16 mm gave width 0.65-0.66 and a jammed insertion;
++10 mm gave 0.41-0.52 and 5/5 dev; verified 5/5 for the 10 mm half, the 16 mm claim not re-tested.)*
++
+ **Grasp verification thresholds** — add validated per-object entries here as you discover them.
+ This table is for one-line signals and numeric thresholds only; a grasp *strategy* that needs
+ procedure or code (e.g. constructing a manual grasp pose when a backend fails) gets its own
+@@ -190,3 +197,78 @@ geometry = estimate_geometry(picked.point_cloud)
+ zs = [float(point[2]) for point in picked.point_cloud.points]
+ height = max(zs) - min(zs)
+ ```
++
++---
++
++## Grasp beyond the top-down envelope: tilted orientation search, then a table relay
++
++**Trigger.** yam_real: solve_ik(backend='mink') of the top-down grasp fails ('best configuration is 0.03-0.16 m from the target') because the object is far from the shoulders, while the place step needs a vertical approach. Search pitch 90->30 deg and yaw 0/+-30 deg with an 8 cm stand-off along the approach axis. Gripper empty while searching. Cost: 2 IK calls per orientation (~0.02 s each, no ticks). If the result is not top-down, set the object down at a relay point that the inserting arm reaches top-down (search a grid around the midpoint of the two arms' home EE positions, at least 8 cm clear of other objects). Then park the arm, re-localize, and re-grasp top-down.
++
++```python
++def qmul(a, b):
++    return (a[0]*b[0]-a[1]*b[1]-a[2]*b[2]-a[3]*b[3], a[0]*b[1]+a[1]*b[0]+a[2]*b[3]-a[3]*b[2],
++            a[0]*b[2]-a[1]*b[3]+a[2]*b[0]+a[3]*b[1], a[0]*b[3]+a[1]*b[2]-a[2]*b[1]+a[3]*b[0])
++
++home_q = {a: tuple(float(v) for v in get_robot_state().end_effector_poses[a].quaternion_wxyz) for a in ("left", "right")}
++
++def tool_quat(arm, pitch_deg, yaw_deg):   # home tool points +x; pitch 90 = straight down
++    p = math.radians(pitch_deg) / 2.0
++    y = math.radians(yaw_deg) / 2.0
++    return qmul((math.cos(y), 0.0, 0.0, math.sin(y)), qmul((math.cos(p), 0.0, math.sin(p), 0.0), home_q[arm]))
++
++def approach_dir(q):   # tool z axis in world
++    w, x, y, z = q
++    return (2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y))
++
++def grasp_plan(arm, gx, gy, gz, stand_off=0.08):
++    for pitch, yaw in [(90, 0)] + [(p, y) for p in (75, 60, 45, 30) for y in (0, 30, -30)]:
++        q = tool_quat(arm, pitch, yaw)
++        a = approach_dir(q)
++        pre = (gx - stand_off * a[0], gy - stand_off * a[1], gz - stand_off * a[2])
++        if solve_ik(Pose((gx, gy, gz), q, get_robot_state().base_frame), arm=arm, backend="mink").ok and \
++           solve_ik(Pose(pre, q, get_robot_state().base_frame), arm=arm, backend="mink").ok:
++            return {"q": q, "pre": pre, "grasp": (gx, gy, gz), "pitch": pitch}
++    return None
++```
++
++**Evidence.** dev seeds 51, 53, 54, 55 (gear out of top-down reach; picked at pitch 45-75 deg) and unseen-check 67, 68, 69 all passed through the relay; v00 (top-down only) 0/5
++
++*Provenance:* yam_real/gear_assembly/task_0 (yamlab Isaac Sim bridge, station yam-isaac), campaign 2026-10-19_14-32-22_gear-isaac; dev 51-55, held-out 3/10 for the whole program (fix_code.py v05). Verified 5/5 on dev seeds by an independent verifier (2026-10-19).
++
++*Verifier gaps:* does not say which arm picks vs inserts on a two-arm station (seed 51 became a left-pick / right-insert handoff); gives no lift move after a tilted grasp (the vertical lift returned PLANNER_FAILED on 2/3 tilted picks, harmlessly); the relay grid spacing and the picking arm's IK check at the relay are implicit. **Limit:** this reaches the *pick*; it does not extend a top-down *insertion*. On yam-isaac every seed whose target shaft was >= ~0.485 m from the right arm base failed with no top-down IK at the insert pose (held-out 3, 5, 7, 8, 9; unseen 66).
++
++---
++
++## Top-down grasp of a hubbed gear: hub-top centre, 10 mm deep
++
++**Trigger.** Gear (or any part with a raised hub over a wider flange) lying flat, seen from the metric camera 'top', to be grasped top-down on yam_real. Prompt 'light blue gear' (the flat gear base also answers, so bound the projected extent at both ends). Measured on yam-isaac: hub top is the highest 2% of the cloud, teeth top 22.5 mm lower (radial z-profile from the hub centre). The jaw contacts at least 6.5 mm below the EE point, so a 16 mm depth closed on the teeth. Gripper empty on approach; one move_to_pose per segment (~3.7 s wall).
++
++```python
++seg = segment_text("top", "light blue gear")
++best = None
++for cand in seg.segmentations[:8]:
++    cloud = mask_to_point_cloud(cand, "top", target_frame=get_robot_state().base_frame)
++    xs = sorted(float(p[0]) for p in cloud.points)
++    ys = sorted(float(p[1]) for p in cloud.points)
++    if len(xs) < 30:
++        continue
++    ext_x = xs[int(0.95 * (len(xs) - 1))] - xs[int(0.05 * (len(xs) - 1))]
++    ext_y = ys[int(0.95 * (len(ys) - 1))] - ys[int(0.05 * (len(ys) - 1))]
++    if 0.015 < ext_x < 0.07 and 0.015 < ext_y < 0.07 and (best is None or cand.score > best[0]):
++        best = (float(cand.score), cloud)   # bounded both ends: the 20 cm gear base also answers this prompt
++if best is None:
++    raise ValueError("gear not found")
++zs = sorted(float(p[2]) for p in best[1].points)
++hub_top = zs[int(0.98 * (len(zs) - 1))]
++top = [p for p in best[1].points if float(p[2]) > hub_top - 0.004]
++gear_x = sum(float(p[0]) for p in top) / len(top)    # centre of the hub's top face
++gear_y = sum(float(p[1]) for p in top) / len(top)
++HUB_GRASP_DEPTH = 0.010   # TCP below the hub top; 0.016 closed on the teeth 22.5 mm below the top
++grasp_z = hub_top - HUB_GRASP_DEPTH
++```
++
++**Evidence.** v03 (16 mm): seed 52 failed (jaw width 0.66, gear jammed tilted). v04/v05 (10 mm): 5/5 dev, widths 0.41-0.52
++
++*Provenance:* yam_real/gear_assembly/task_0 (yamlab Isaac Sim bridge, station yam-isaac), campaign 2026-10-19_14-32-22_gear-isaac; dev 51-55, held-out 3/10 for the whole program (fix_code.py v05). Verified 5/5 on dev seeds by an independent verifier (2026-10-19).
++
++*Verifier gap:* no entry gives the seat height for an insertion. The verifier derived EE z = plate surface_z + (grasp_z - table_z), segmenting the table ('wooden table') for table_z. On held-out seeds 1 and 2 the insertion stalled ~15 mm above the seat with the TCP 4-6 mm off the shaft axis and there is no recovery; treat insertion as unsolved.
+diff --git a/.claude/skills/iterative-debugging/skills/localize.md b/.claude/skills/iterative-debugging/skills/localize.md
+index 40fc3d2..0ab081c 100644
+--- a/.claude/skills/iterative-debugging/skills/localize.md
++++ b/.claude/skills/iterative-debugging/skills/localize.md
+@@ -132,3 +132,68 @@ run evidence.
+ 
+ | Target | Z formula | Notes |
+ |---|---|---|
++
++---
++
++## Park bimanual YAM arms out of the overhead view before perceiving
++
++**Trigger.** yam_real bimanual station, metric camera 'top': an object near either arm's home pose is partly hidden (fewer parts found than expected, e.g. 2 of 3 shafts). Cost: one move_to_joints per arm (~2-3 s wall, 2 motions of the episode budget), grippers empty. PARK_SWING_RAD 0.7 is the swing used on yam-isaac (arms end near y=+-0.47, z=0.91, clear of the wall).
++
++```python
++OUTWARD = {"left": 1.0, "right": -1.0}   # joint-0 sign that swings each YAM arm away from the table centre
++PARK_SWING_RAD = 0.7                       # swing used on yam-isaac; arms then sit near y=+-0.47, z=0.91
++home_joints = get_robot_state().joint_positions   # read at program start, both arms at home
++
++def park(arm):
++    target = [float(v) for v in home_joints[arm]]
++    target[0] = target[0] + OUTWARD[arm] * PARK_SWING_RAD
++    moved = move_to_joints(target, tolerance=0.02, max_steps=200, arm=arm)
++    return bool(moved.ok)
++
++for arm_name in ("left", "right"):
++    park(arm_name)
++plate = segment_text("top", "gear base plate")   # perceive only after both arms are parked
++```
++
++**Evidence.** yam_real/gear_assembly/task_0 seed 54: v00 failed 'gear base with three shafts not found' (right arm over the plate); with parking, 3 shafts found on all 10 seeds (5 dev + 5 unseen-check)
++
++*Provenance:* yam_real/gear_assembly/task_0 (yamlab Isaac Sim bridge, station yam-isaac), campaign 2026-10-19_14-32-22_gear-isaac; dev 51-55, held-out 3/10 for the whole program (fix_code.py v05). Verified 5/5 on dev seeds by an independent verifier (2026-10-19).
++
++---
++
++## Find raised pins/shafts on a plate and select the middle one
++
++**Trigger.** Goal names one of several identical pins/shafts standing on a plate ('the middle of the three shafts'). Segment the plate with prompt 'gear base plate' (fallback 'blue plate') on camera 'top', project with mask_to_point_cloud(..., target_frame=base_frame), and use surface_z = median z of that cloud (the plate top). min_rise 12 mm / join_r 15 mm suit ~10 mm pins about 30 mm tall spaced at least 4.5 cm apart. Reject a candidate unless exactly 3 clusters share a top height (max-min < 1 cm) at least 15 mm above surface_z, which also rejects the robot mounting plates.
++
++```python
++def raised_clusters(xs, ys, zs, surface_z, min_rise=0.012, join_r=0.015, min_pts=5):
++    order = sorted([i for i in range(len(zs)) if zs[i] > surface_z + min_rise], key=lambda i: -zs[i])
++    groups = []
++    for i in order:
++        home = None
++        for g in groups:
++            if math.hypot(xs[i] - g["sx"], ys[i] - g["sy"]) < join_r:
++                home = g
++                break
++        if home is None:
++            groups.append({"sx": xs[i], "sy": ys[i], "m": [i]})
++        else:
++            home["m"].append(i)
++    out = []
++    for g in groups:
++        if len(g["m"]) >= min_pts:
++            zmax = max(zs[i] for i in g["m"])
++            top = [i for i in g["m"] if zs[i] > zmax - 0.004]   # top disc only: side walls bias toward the camera
++            out.append({"x": sum(xs[i] for i in top) / len(top), "y": sum(ys[i] for i in top) / len(top), "ztop": zmax, "n": len(g["m"])})
++    ranked = sorted([(-out[k]["n"], k) for k in range(len(out))])
++    return [out[k] for neg_n, k in ranked[:3]]
++
++def middle_of_three(shafts):
++    pairs = [(math.hypot(shafts[i]["x"] - shafts[j]["x"], shafts[i]["y"] - shafts[j]["y"]), i, j) for i in range(3) for j in range(i + 1, 3)]
++    far = max(pairs)
++    return shafts[[k for k in range(3) if k != far[1] and k != far[2]][0]]
++```
++
++**Evidence.** found the 3 shafts and the correct middle one on all 10 seeds run (dev 51-55, unseen-check 66-70), including rotated plates (53, 54) and uneven spacing (seed 51: 7.6 cm / 4.5 cm)
++
++*Provenance:* yam_real/gear_assembly/task_0 (yamlab Isaac Sim bridge, station yam-isaac), campaign 2026-10-19_14-32-22_gear-isaac; dev 51-55, held-out 3/10 for the whole program (fix_code.py v05). Verified 5/5 on dev seeds by an independent verifier (2026-10-19).

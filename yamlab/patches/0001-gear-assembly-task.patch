@@ -1,0 +1,336 @@
+diff --git a/yamlab/configs/schema.py b/yamlab/configs/schema.py
+index 26703bd..42df6d4 100644
+--- a/yamlab/configs/schema.py
++++ b/yamlab/configs/schema.py
+@@ -147,7 +147,8 @@ class ResolvedConfig(_Strict):
+     # Per-arm grasp targets: {arm_name: [object_name, ...]} (which object each arm grasps).
+     grasp_detect: Optional[dict[str, list[str]]] = None
+     kwargs: Optional[dict[str, Any]] = None
+-    success: Optional[dict[str, float]] = None
++    # Thresholds, plus coordinate lists (e.g. ontop_pot_xy_point_m: [x, y]).
++    success: Optional[dict[str, Union[float, list[float]]]] = None
+     mimic_signals: Optional[dict[str, float]] = None
+     friction: Optional[dict[str, float]] = None
+ 
+diff --git a/yamlab/configs/tasks/put_pot_on_cooktop.yaml b/yamlab/configs/tasks/put_pot_on_cooktop.yaml
+index bf719e2..a18ee7b 100644
+--- a/yamlab/configs/tasks/put_pot_on_cooktop.yaml
++++ b/yamlab/configs/tasks/put_pot_on_cooktop.yaml
+@@ -3,6 +3,15 @@
+ #
+ # Two-stage bimanual task: pick pot and place it on top of cooktop.
+ #
++# The pot/cooktop are currently the Isaac Lab factory gear-assembly assets:
++# `pot` is factory_gear_medium and `cooktop` is factory_gear_base, so the
++# task is "pick the gear and seat it on its shaft". The object keys stay
++# pot/cooktop so --asset flags, recorded datasets and the mimic env keep
++# working. Fetch the assets with `python scripts/download_gear_assets.py`.
++# To go back to a pot/cooktop, pass --asset pot=... --asset cooktop=... AND
++# restore the pot `success:` thresholds (drop ontop_z_offset_m /
++# ontop_xy_tolerance_m) and pick_by_two_hands: true.
++#
+ # Keys here OVERRIDE configs/defaults.yaml on conflict.
+ # =====================================================================
+ 
+@@ -21,17 +30,17 @@ env_names:
+ # The spawn-pose center stays in the task's *_manager_cfg.py.
+ # Grasp-detection targets are declared under `grasp.detect` below, not here.
+ objects:
+-  pot:                                   # picked object
+-    mass: 1.3
+-    asset: null
++  pot:                                   # picked object: factory gear (medium, 26 g as in the USD)
++    mass: 0.026
++    asset: yamlab_datasets/tasks_data/PutPotOnCooktop/objects/Gear/factory_gear_medium
+     randomization:
+       region_size: [0.38, 0.50]            # position range, mode 1: bounding box (m) the object footprint must stay inside (effective center range subtracts the object size)
+       # position_range: [0.19, 0.25]       # position range, mode 2: direct +/- distance (m) the object center may move (no size subtraction); uncomment and remove region_size to use
+-      orientation_range_deg: 37.5          # orientation range: +/- yaw rotation (degrees)
++      orientation_range_deg: 180           # orientation range: +/- yaw rotation (degrees); the gear is round, any yaw works
+       scale_range: [1.0, 1.0]              # object scale multiplier [min, max]
+-  cooktop:                                   # base object
++  cooktop:                                   # base object: factory gear base (heavy so insertion contact doesn't shove it)
+     mass: 5.0
+-    asset: null
++    asset: yamlab_datasets/tasks_data/PutPotOnCooktop/objects/GearBase/factory_gear_base
+     randomization:
+       region_size: [0.40, 0.30]            # position range, mode 1: bounding box (m) the object footprint must stay inside (effective center range subtracts the object size)
+       # position_range: [0.20, 0.15]       # position range, mode 2: direct +/- distance (m) the object center may move (no size subtraction); uncomment and remove region_size to use
+@@ -44,7 +53,7 @@ objects:
+ # omitted or given an empty list gets none -> no wasted compute), and each
+ # named object gets activate_contact_sensors so the finger<->object contact
+ # force is reported. Force/pad thresholds inherit from configs/robot/yam.yaml `grasp:`.
+-# Both arms pick pot here (bimanual pick).
++# Either arm may pick the gear (single-hand pick; it is too small for two).
+ grasp_detect:
+   left_arm: [pot]
+   right_arm: [pot]
+@@ -52,10 +61,10 @@ grasp_detect:
+ # ---- Runtime kwargs forwarded to the task-env constructor -----------
+ kwargs:
+   gripper_grasp_clamp_extra: 0.0075
++  pick_by_two_hands: false               # gear is ~6 cm: one arm picks it (every mode)
+ modes:
+   teleoperation:
+     kwargs:
+-      pick_by_two_hands: true                # require both arms for the pick
+       check_gripper_release_for_ontop: true  # require gripper release for stage 2
+     # Deterministic spawn-pose sequence for systematic demo collection
+     # (teleop only; mimicgen/replay/evaluation ignore it and randomize instead).
+@@ -89,11 +98,20 @@ modes:
+ success:
+   pick_lift_threshold_m: 0.05              # pot lift above initial resting height
+   pick_required_consecutive_steps: 8
+-  ontop_height_tolerance_m: 0.02           # +/- about expected resting height
+-  ontop_orientation_tolerance_rad: 0.2     # pot within this of upright
++  ontop_height_tolerance_m: 0.005          # +/- about expected resting height (gear resting on the shaft tip is +3 cm)
++  ontop_orientation_tolerance_rad: 0.1     # pot within this of upright
++  # Gear and base share the factory frame: a seated gear has the base's origin.
++  ontop_z_offset_m: 0.0                    # expected pot-minus-cooktop root Z when placed
++  ontop_xy_tolerance_m: 0.005              # max gear-axis-to-shaft XY distance when placed
++  # The gear's origin is on its rim, 0.030375 m from its axis, so comparing origins would
++  # also demand the gear's yaw match the base's (within ~9 deg at 5 mm). Compare the gear's
++  # axis with the medium shaft instead (both at local x = 0.030375 in the factory frame).
++  ontop_pot_xy_point_m: [0.030375, 0.0]
++  ontop_cooktop_xy_point_m: [0.030375, 0.0]
+   ontop_required_consecutive_steps_teleop: 8
+   ontop_required_consecutive_steps_eval: 30
+-# Note: XY alignment tolerance is computed at runtime from asset sizes.
++# Without ontop_xy_tolerance_m / ontop_z_offset_m, XY tolerance is computed at
++# runtime from asset sizes and Z assumes the pot stacks on top of the cooktop.
+ 
+ # ---- Per-task domain-randomization override (example) ---------------
+ # Overrides configs/defaults.yaml `domain_randomization:` for this task only
+diff --git a/yamlab/envs/mimic/put_pot_on_cooktop_mimic_env.py b/yamlab/envs/mimic/put_pot_on_cooktop_mimic_env.py
+index 6e3b934..4160ed4 100644
+--- a/yamlab/envs/mimic/put_pot_on_cooktop_mimic_env.py
++++ b/yamlab/envs/mimic/put_pot_on_cooktop_mimic_env.py
+@@ -29,7 +29,8 @@ def make_put_pot_on_cooktop_mimic_env(**kwargs):
+     Returns:
+         A ``PutPotOnCooktopMimicEnv`` instance.
+     """
+-    kwargs['pick_by_two_hands'] = True
++    if 'pick_by_two_hands' not in kwargs:
++        kwargs['pick_by_two_hands'] = True
+ 
+     if 'check_gripper_release_for_ontop' not in kwargs:
+         kwargs['check_gripper_release_for_ontop'] = True
+@@ -48,7 +49,7 @@ def make_put_pot_on_cooktop_mimic_env(**kwargs):
+         config_only_keys = ['assets_instance_paths', 'objects_randomization',
+                            'init_joint_pos_randomization', 'teleoperation',
+                            'observation_modalities', 'num_envs', 'data_generation',
+-                           'pick_by_two_hands', 'check_gripper_release_for_ontop']
++                           'check_gripper_release_for_ontop']
+         constructor_kwargs = {k: v for k, v in kwargs.items() if k not in config_only_keys}
+ 
+         return PutPotOnCooktopMimicEnv(cfg, **constructor_kwargs)
+diff --git a/yamlab/envs/tasks/put_pot_on_cooktop_manager.py b/yamlab/envs/tasks/put_pot_on_cooktop_manager.py
+index 63d5e8b..d337df0 100644
+--- a/yamlab/envs/tasks/put_pot_on_cooktop_manager.py
++++ b/yamlab/envs/tasks/put_pot_on_cooktop_manager.py
+@@ -15,7 +15,7 @@ from isaaclab.managers import SceneEntityCfg
+ from .yam_bimanual_env import YamBimanualEnv, make_task_env
+ from .put_pot_on_cooktop_manager_cfg import PutPotOnCooktopManagerEnvCfg
+ from yamlab.utils.task_logic import check_pick_success, check_ontop_success
+-from yamlab.utils.assets import load_asset_size, OBJ_Z_OFFSET
++from yamlab.utils.assets import load_asset_size, resting_origin_z
+ from yamlab.robot.yam import ROBOT
+ # Stage-success thresholds are read from configs/tasks/put_pot_on_cooktop.yaml (success:).
+ from yamlab.configs import get_task_config
+@@ -27,6 +27,13 @@ ONTOP_HEIGHT_TOLERANCE_M = _SUCCESS["ontop_height_tolerance_m"]
+ ONTOP_ORIENTATION_TOLERANCE_RAD = _SUCCESS["ontop_orientation_tolerance_rad"]
+ ONTOP_REQUIRED_CONSECUTIVE_STEPS_EVAL = _SUCCESS["ontop_required_consecutive_steps_eval"]
+ ONTOP_REQUIRED_CONSECUTIVE_STEPS_TELEOP = _SUCCESS["ontop_required_consecutive_steps_teleop"]
++# Optional overrides for objects sharing a frame (e.g. a gear seated on its base's
++# shaft has the base's origin): fixed placed-Z offset and XY tolerance.
++ONTOP_Z_OFFSET_M = _SUCCESS.get("ontop_z_offset_m")
++ONTOP_XY_TOLERANCE_M = _SUCCESS.get("ontop_xy_tolerance_m")
++# Optional local (x, y) points compared instead of the origins (e.g. gear axis vs shaft).
++ONTOP_POT_XY_POINT_M = _SUCCESS.get("ontop_pot_xy_point_m")
++ONTOP_COOKTOP_XY_POINT_M = _SUCCESS.get("ontop_cooktop_xy_point_m")
+ 
+ 
+ def make_put_pot_on_cooktop_env(**kwargs):
+@@ -79,19 +86,20 @@ class PutPotOnCooktopManager(YamBimanualEnv):
+         usd_path_0 = cfg.scene.pot.spawn.usd_path
+         size_info_0 = load_asset_size(os.path.dirname(usd_path_0))
+         pot_height = size_info_0['size']['z']
+-        self.pot_init_z = ROBOT.table_position[2] + pot_height / 2.0 + OBJ_Z_OFFSET
++        self.pot_init_z = resting_origin_z(size_info_0, ROBOT.table_position[2])
+ 
+         usd_path_1 = cfg.scene.cooktop.spawn.usd_path
+         size_info_1 = load_asset_size(os.path.dirname(usd_path_1))
+         cooktop_height = size_info_1['size']['z']
+-        self.cooktop_init_z = ROBOT.table_position[2] + cooktop_height / 2.0 + OBJ_Z_OFFSET
++        self.cooktop_init_z = resting_origin_z(size_info_1, ROBOT.table_position[2])
+ 
+         self.pot_height = pot_height
+         self.cooktop_height = cooktop_height
+ 
+         pot_xy_radius = math.sqrt(size_info_0['size']['x'] ** 2 + size_info_0['size']['y'] ** 2) / 2.0
+         cooktop_xy_radius = math.sqrt(size_info_1['size']['x'] ** 2 + size_info_1['size']['y'] ** 2) / 2.0
+-        self.ontop_xy_threshold = max(pot_xy_radius, cooktop_xy_radius)
++        self.ontop_xy_threshold = (ONTOP_XY_TOLERANCE_M if ONTOP_XY_TOLERANCE_M is not None
++                                   else max(pot_xy_radius, cooktop_xy_radius))
+ 
+         self._update_reward_parameters_in_config(cfg)
+ 
+@@ -233,6 +241,9 @@ class PutPotOnCooktopManager(YamBimanualEnv):
+             cooktop_height=self.cooktop_height,
+             height_tolerance=ONTOP_HEIGHT_TOLERANCE_M,
+             xy_tolerance=self.ontop_xy_threshold,
++            expected_z_offset=ONTOP_Z_OFFSET_M,
++            pot_xy_point=ONTOP_POT_XY_POINT_M,
++            cooktop_xy_point=ONTOP_COOKTOP_XY_POINT_M,
+             orientation_tolerance=ONTOP_ORIENTATION_TOLERANCE_RAD,
+             check_gripper_release=self.check_gripper_release_for_ontop,
+             gripper_release_mode=self.gripper_release_mode,
+diff --git a/yamlab/envs/tasks/yam_bimanual_env_cfg.py b/yamlab/envs/tasks/yam_bimanual_env_cfg.py
+index 12bd335..d8ee521 100644
+--- a/yamlab/envs/tasks/yam_bimanual_env_cfg.py
++++ b/yamlab/envs/tasks/yam_bimanual_env_cfg.py
+@@ -24,7 +24,7 @@ from yamlab.envs.manipulation_env_cfg import ManipulationEnvCfg
+ from yamlab.envs.yam_bimanual_scene import YamBimanualSceneCfg
+ from yamlab.domain_randomization import DomainRandomizationCfg
+ from yamlab.robot.yam import ROBOT
+-from yamlab.utils.assets import OBJ_Z_OFFSET, find_contact_body_link, get_asset_usd_path, load_asset_size
++from yamlab.utils.assets import find_contact_body_link, get_asset_usd_path, load_asset_size, resting_origin_z
+ from yamlab.utils.perception import extract_background_mask, get_arm_joint_pos, get_gripper_continuous_state
+ from yamlab.utils.observation_modalities import validate_observation_modalities
+ 
+@@ -456,8 +456,7 @@ class YamBimanualEnvCfg(ManipulationEnvCfg):
+ 
+                 size_info = load_asset_size(asset_instance_path)
+                 if size_info and 'size' in size_info and 'z' in size_info['size']:
+-                    asset_height = size_info['size']['z']
+-                    z_position = ROBOT.table_position[2] + asset_height / 2.0 + OBJ_Z_OFFSET
++                    z_position = resting_origin_z(size_info, ROBOT.table_position[2])
+ 
+                     new_init_pos = list(asset_cfg.init_state.pos)
+                     new_init_pos[2] = z_position
+diff --git a/yamlab/envs/yam_bimanual_scene.py b/yamlab/envs/yam_bimanual_scene.py
+index bb39322..3f0fc2b 100644
+--- a/yamlab/envs/yam_bimanual_scene.py
++++ b/yamlab/envs/yam_bimanual_scene.py
+@@ -13,6 +13,11 @@ from yamlab.utils.perception import intrinsics_to_matrix
+ 
+ from isaaclab.sensors.camera import TiledCameraCfg
+ 
++# Data types every scene camera renders. RGB is all teleop, replay and evaluation read.
++# Set this before the env cfg is built to render more (scripts/aspire_bridge_server.py adds
++# "distance_to_image_plane" for depth).
++CAMERA_DATA_TYPES = ["rgb"]
++
+ 
+ @configclass
+ class YamBimanualSceneCfg(InteractiveSceneCfg):
+@@ -84,7 +89,7 @@ class YamBimanualSceneCfg(InteractiveSceneCfg):
+                 update_period=0.0,
+                 height=height,
+                 width=width,
+-                data_types=["rgb"],
++                data_types=list(CAMERA_DATA_TYPES),
+                 spawn=sim_utils.PinholeCameraCfg.from_intrinsic_matrix(
+                     intrinsic_matrix=intrinsics_to_matrix(ROBOT.camera_intrinsics(name)),
+                     width=calib_width,
+diff --git a/yamlab/utils/assets.py b/yamlab/utils/assets.py
+index c831bca..de03466 100644
+--- a/yamlab/utils/assets.py
++++ b/yamlab/utils/assets.py
+@@ -73,6 +73,25 @@ def load_asset_size(asset_folder_path: str) -> dict:
+     return None
+ 
+ 
++def resting_origin_z(size_info: dict, table_z: float) -> float:
++    """Return the root Z at which an object rests on the table (plus OBJ_Z_OFFSET).
++
++    Uses the local bbox ``min.z`` from asset_size.json when present (origin not at
++    the bbox center, e.g. the factory gear assets); otherwise assumes a centered
++    origin and uses half the height.
++
++    Args:
++        size_info (dict): Parsed asset_size.json.
++        table_z (float): Table surface height (m).
++
++    Returns:
++        float: Resting root Z (m).
++    """
++    if 'min' in size_info and 'z' in size_info['min']:
++        return table_z - size_info['min']['z'] + OBJ_Z_OFFSET
++    return table_z + size_info['size']['z'] / 2.0 + OBJ_Z_OFFSET
++
++
+ def get_asset_usd_path(asset_folder_path: str) -> str:
+     """Return the USD file path for an asset instance folder.
+ 
+diff --git a/yamlab/utils/task_logic.py b/yamlab/utils/task_logic.py
+index 91de6f5..0f45572 100644
+--- a/yamlab/utils/task_logic.py
++++ b/yamlab/utils/task_logic.py
+@@ -2,6 +2,7 @@
+ import torch
+ 
+ from isaaclab.managers import SceneEntityCfg
++from isaaclab.utils.math import quat_apply
+ 
+ 
+ def check_pick_success(
+@@ -66,6 +67,9 @@ def check_ontop_success(
+     height_tolerance: float = 0.02,
+     orientation_tolerance: float | None = 0.2,
+     xy_tolerance: float = 0.20,
++    expected_z_offset: float | None = None,
++    pot_xy_point: tuple | None = None,
++    cooktop_xy_point: tuple | None = None,
+     check_gripper_release: bool = False,
+     gripper_release_mode: str = "both",
+     grasp=None
+@@ -74,7 +78,9 @@ def check_ontop_success(
+ 
+     Success requires: pot XY within xy_tolerance of cooktop; pot Z within
+     height_tolerance of cooktop_center_z + cooktop_height/2 + pot_height/2; and
+-    pot upright. Optionally also checks gripper release.
++    pot upright. Optionally also checks gripper release. With ``expected_z_offset``
++    the expected Z is cooktop_z + expected_z_offset instead (objects sharing a frame,
++    e.g. a gear seated on its base's shaft has offset 0).
+ 
+     Args:
+         env: Environment instance.
+@@ -85,6 +91,13 @@ def check_ontop_success(
+         height_tolerance: Max deviation from expected stacking height (m).
+         orientation_tolerance: Max angle from vertical (rad). None skips check.
+         xy_tolerance: Max horizontal distance between obj centers (m).
++        expected_z_offset: Fixed pot-minus-cooktop root Z when placed (m). None uses the
++            centered-origin stacking height.
++        pot_xy_point: (x, y) in the pot's local frame to compare instead of its origin,
++            e.g. a gear's axis when its origin is on its rim. Rotated by the pot's pose, so
++            the XY check no longer depends on how the pot is turned about that point.
++        cooktop_xy_point: (x, y) in the cooktop's local frame to compare against, e.g. the
++            shaft the gear seats on.
+         check_gripper_release: Whether to check gripper release.
+         gripper_release_mode: "both", "left_only", or "right_only".
+         grasp: grasp handle exposing is_grasping() -- the robot or one of its arms (required when check_gripper_release=True).
+@@ -101,10 +114,21 @@ def check_ontop_success(
+     cooktop_pos = cooktop.data.root_pos_w.torch
+     cooktop_z = cooktop_pos[:, 2]
+ 
+-    xy_distance = torch.norm(pot_pos[:, :2] - cooktop_pos[:, :2], dim=1)
++    def _xy_point(pos, quat, local_xy):
++        if local_xy is None:
++            return pos[:, :2]
++        local = torch.tensor([local_xy[0], local_xy[1], 0.0], device=pos.device, dtype=pos.dtype)
++        return (pos + quat_apply(quat, local.expand(pos.shape[0], 3)))[:, :2]
++
++    pot_xy = _xy_point(pot_pos, pot_quat, pot_xy_point)
++    cooktop_xy = _xy_point(cooktop_pos, cooktop.data.root_quat_w.torch, cooktop_xy_point)
++    xy_distance = torch.norm(pot_xy - cooktop_xy, dim=1)
+     xy_aligned = xy_distance < xy_tolerance
+ 
+-    expected_pot_z = cooktop_z + cooktop_height / 2.0 + pot_height / 2.0
++    if expected_z_offset is not None:
++        expected_pot_z = cooktop_z + expected_z_offset
++    else:
++        expected_pot_z = cooktop_z + cooktop_height / 2.0 + pot_height / 2.0
+     at_ontop_height = torch.abs(pot_z - expected_pot_z) < height_tolerance
+ 
+     if orientation_tolerance is not None:

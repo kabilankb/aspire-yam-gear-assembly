@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "bundle_id": "yam-isaac-sim-v1",
+  "station": "yam-isaac",
+  "captured_at": "2026-10-19T12:51:14",
+  "calibration_sha256": "87fa2de5ea88ae830db8fbdbb058128f0c9430665961eea85ade054e9f19756d",
+  "cameras": {
+    "top": {
+      "serial": "isaac-top",
+      "resolution": [
+        640,
+        480
+      ],
+      "intrinsics": [
+        [
+          391.958984375,
+          0.0,
+          320.0
+        ],
+        [
+          0.0,
+          391.958984375,
+          240.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    }
+  },
+  "provenance": {
+    "method": "isaac-sim-ground-truth",
+    "bridge_task": "PutPotOnCooktop-v0"
+  }
+}

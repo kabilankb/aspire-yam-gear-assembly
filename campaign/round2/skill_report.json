@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "benchmark": "yam_real",
+  "suite": "gear_assembly",
+  "task_id": 0,
+  "skill_library_sha": "d7a16b8b4f8e7b43",
+  "consulted": [
+    {
+      "skill": "localize.md",
+      "section": "Park bimanual YAM arms out of the overhead view before perceiving",
+      "verdict": "useful",
+      "evidence": "applied verbatim in every version; the plate with 3 shafts was found on all 8 dev seeds (56-63) and all 5 unseen-check seeds (71-75)"
+    },
+    {
+      "skill": "localize.md",
+      "section": "Find raised pins/shafts on a plate and select the middle one",
+      "verdict": "useful",
+      "evidence": "raised_clusters + middle_of_three found the correct middle shaft on 13/13 seeds, including uneven spacing (56: 4.5/7.5 cm). I required exactly 3 clusters (min_pts 8) and excluded clusters within 5 cm of the gear, because the gear's own mask also yields clusters"
+    },
+    {
+      "skill": "localize.md",
+      "section": "Standard Localization Helper",
+      "verdict": "not-applicable",
+      "evidence": "used segment_text + mask_to_point_cloud directly, because the gear prompt also returns the plate and needs extent bounds"
+    },
+    {
+      "skill": "grasp.md",
+      "section": "Top-down grasp of a hubbed gear: hub-top centre, 10 mm deep",
+      "verdict": "useful",
+      "evidence": "prompt 'light blue gear' + 1.5-7 cm extent bound + 10 mm depth applied verbatim; jaw widths 0.46-0.50 on all regrasps; all 8 top-down insertions across v00/v06 dev (56 57 58 63) and unseen 72 73 74 succeeded with it"
+    },
+    {
+      "skill": "grasp.md",
+      "section": "Key Conventions",
+      "verdict": "useful",
+      "evidence": "yam_real jaw note (contact >= 6.5 mm below EE; 10 mm hub depth) confirmed: widths 0.46-0.50 with no tooth contact on the top-down grasps"
+    },
+    {
+      "skill": "grasp.md",
+      "section": "Grasp beyond the top-down envelope: tilted orientation search, then a table relay",
+      "verdict": "useful",
+      "evidence": "the gear was outside the inserting arm's reach on 7/8 dev seeds; the left arm's pitch 60-90 pick + set-down at the arms' home midpoint + right-arm regrasp worked on every seed it ran (gear hub_top after relay 0.7881 vs 0.7882 before, i.e. level). Its stated Limit holds: tilted INSERTION (pitch 60-80) failed on 59 60 61 62 and unseen 71"
+    },
+    {
+      "skill": "grasp.md",
+      "section": "Standard Pick-and-Place Template",
+      "verdict": "not-applicable",
+      "evidence": "read for structure; the task needed relay + insertion, so the template's place step was not used"
+    },
+    {
+      "skill": "transport.md",
+      "section": "Physics Settling After Release",
+      "verdict": "not-applicable",
+      "evidence": "yam_real success is judged after the program, and the post-release retreat/press/park motions advance time anyway"
+    }
+  ],
+  "proposed_edits": [
+    {
+      "skill": "grasp.md",
+      "section": "Grasp beyond the top-down envelope: tilted orientation search, then a table relay",
+      "change": "Extend the Limit paragraph: 'A tilted grasp also tilts the jaw closing axis. On YAM the closing axis is tool y, which is world x at pitch 90 / yaw 0 for the tool_quat() above. tool_quat pitches about world y, so at pitch p the closing axis is (90-p) deg off horizontal and the hub hangs tilted in the jaws. Tilted insertions (pitch 60-80) stalled 11-14 mm above the seat on 5/5 seeds (yam_real gear_assembly dev 59-62, unseen 71) under four different strategies: plain descent, visual alignment, roll-90 tool, release+press. Rolling the tool 90 deg about its approach axis keeps the closing axis horizontal, but the regrasp then closed at width 0.58-0.77 (on the teeth) and still stalled. Treat an insertion pose that needs pitch < 85 as unsolved.'",
+      "why": "The section is graded useful for the pick, but a reader may assume the same tilted orientation works for placing or inserting. Five seeds and four strategies show it does not, and the closing-axis geometry explains why"
+    },
+    {
+      "skill": "localize.md",
+      "section": "Placement Z Notes",
+      "change": "Add a row or warning: 'yam_real top camera, object HELD in the gripper 6-9 cm above the table: the hub-top centroid of the held gear (points within [EE_z - hold, EE_z + grasp_depth]) read -18 to -25 mm in world x relative to the EE, but the set-down ground truth was +0.6 mm (y read within 2 mm). The x bias depends on position (-24 at x 0.48, -18 at x 0.77). Never servo an in-hand offset from this view without first setting the object down and re-measuring it on the table.'",
+      "why": "v03 servoed on this reading and pushed the gear 2 cm off the shaft (seeds 59, 60). The calibration probe (set the gear down, re-localize it) exposed the bias"
+    }
+  ],
+  "proposed_new": [
+    {
+      "skill": "grasp.md",
+      "title": "Reject 'ok' mink IK solutions by their reported position error",
+      "trigger": "yam_real: choosing among candidate orientations (pitch/yaw search) for a precise pose such as an insertion. solve_ik(..., backend='mink') returns ok=True for any solution within 10 mm, and move_to_pose then lands up to that far away (seed 59: commanded x 0.8131, achieved 0.8059 above the shaft). IKResult.diagnostics['position_error_m'] carries the actual residual. Cost: one solve_ik per pose (~0.02 s, no ticks); arm empty or holding, it does not matter. Use a max_err that matches the precision the step needs (2 mm for a peg/bore here), and fall back to the default 10 mm only if nothing passes.",
+      "code": "def ik_tight(arm, pos, q, max_err):\n    r = solve_ik(Pose(tuple(pos), q, get_robot_state().base_frame), arm=arm, backend=\"mink\")\n    if not r.ok:\n        return False\n    try:\n        return float(r.diagnostics[\"position_error_m\"]) <= max_err\n    except Exception:\n        return True\n\nchosen = None\nfor max_err in (0.002, 0.010):          # strict first, then mink's own tolerance\n    for q in candidate_quats:               # e.g. pitch 90 first, then tilted ones\n        if all(ik_tight(\"right\", p, q, max_err) for p in poses_needed):\n            chosen = (q, max_err)\n            break\n    if chosen is not None:\n        break",
+      "evidence": "v01 (ok-only check) achieved 7 mm short of the above-shaft pose on 59 and 1.8 mm short on 62. v02-v06 (2 mm check) reached every chosen free-space pose within 0.2 mm on all 8 dev seeds. It removed the IK error but flipped no seed by itself: the tilted seeds failed for the reason in the blocked note"
+    }
+  ]
+}

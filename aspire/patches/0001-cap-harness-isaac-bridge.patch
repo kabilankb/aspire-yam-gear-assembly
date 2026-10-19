@@ -1,0 +1,167 @@
+diff --git a/src/cap_harness/batch.py b/src/cap_harness/batch.py
+index 8461b96..a42b92d 100644
+--- a/src/cap_harness/batch.py
++++ b/src/cap_harness/batch.py
+@@ -305,10 +305,14 @@ def run_seeds(
+     Results stream to ``results_jsonl`` as they land, so an interrupted sweep
+     leaves the seeds it finished on disk rather than nothing at all.
+     """
+-    if benchmark not in {"libero-pro", "robosuite"}:
++    # yam_real is batchable only against an Isaac bridge: the simulator lives in the bridge
++    # process, so a worker only reconnects per seed. Hardware is never batched.
++    isaac = benchmark == "yam_real" and bool(os.environ.get("CAP_HARNESS_ISAAC_BRIDGE"))
++    if benchmark not in {"libero-pro", "robosuite"} and not isaac:
+         raise ValueError(
+-            f"run-batch does not accept {benchmark}: only libero-pro and robosuite "
+-            "support worker reuse. Use a fresh `cap-harness run` process for each episode."
++            f"run-batch does not accept {benchmark}: only libero-pro, robosuite and yam_real "
++            "against an Isaac bridge support worker reuse. Use a fresh `cap-harness run` "
++            "process for each episode."
+         )
+     if init_mode not in {"saved", "seeded"}:
+         raise ValueError("init_mode must be 'saved' or 'seeded'")
+diff --git a/src/cap_harness/cli.py b/src/cap_harness/cli.py
+index f735146..04c6df7 100644
+--- a/src/cap_harness/cli.py
++++ b/src/cap_harness/cli.py
+@@ -5,6 +5,7 @@ from __future__ import annotations
+ import argparse
+ from collections.abc import Sequence
+ import json
++import os
+ from pathlib import Path
+ import sys
+ from typing import Any
+@@ -145,11 +146,21 @@ def build_parser() -> argparse.ArgumentParser:
+         default="libero-pro",
+     )
+     run.add_argument("--suite", required=True)
+-    run.add_argument("--station", default="yam-example", help="YAM station profile identifier")
++    run.add_argument(
++        "--station",
++        default=None,
++        help="YAM station profile identifier (default: $CAP_HARNESS_YAM_STATION or yam-example)",
++    )
+     run.add_argument(
+         "--station-config-root", type=Path, help="Custom YAM station profiles directory"
+     )
+     run.add_argument("--allow-motion", action="store_true", help="Enable physical YAM commands")
++    run.add_argument(
++        "--isaac-bridge",
++        metavar="HOST:PORT",
++        help="run yam_real against a yamlab Isaac Sim bridge instead of the arm servers "
++        "(use with --station yam-isaac; default: $CAP_HARNESS_ISAAC_BRIDGE)",
++    )
+     run.add_argument("--task-id", type=int, required=True)
+     run.add_argument("--seed", type=int, default=1)
+     run.add_argument("--program", type=Path, required=True)
+@@ -204,8 +215,9 @@ def build_parser() -> argparse.ArgumentParser:
+     )
+     batch.add_argument(
+         "--benchmark",
+-        choices=("libero-pro", "robosuite"),
++        choices=("libero-pro", "robosuite", "yam_real"),
+         default="libero-pro",
++        help="yam_real only against an Isaac Sim bridge ($CAP_HARNESS_ISAAC_BRIDGE), never hardware",
+     )
+     batch.add_argument("--suite", required=True)
+     batch.add_argument("--task-id", type=int, required=True)
+@@ -403,6 +415,7 @@ def _run_command(args: argparse.Namespace) -> int:
+         station=args.station,
+         station_config_root=args.station_config_root,
+         allow_motion=args.allow_motion,
++        isaac_bridge=args.isaac_bridge,
+     )
+     # Flushed explicitly: a simulator that segfaults on interpreter teardown (Isaac Sim does)
+     # would otherwise discard these lines when stdout is a file.
+@@ -422,6 +435,15 @@ def _run_batch_command(args: argparse.Namespace) -> int:
+     from cap_harness.batch import parse_seed_arguments, run_seeds, summarize
+ 
+     seeds = parse_seed_arguments(args.seeds)
++    if args.benchmark == "yam_real":
++        # Batching reuses worker processes across seeds; that is for a simulator, and a
++        # single bridge serves one episode at a time.
++        if not os.environ.get("CAP_HARNESS_ISAAC_BRIDGE"):
++            print("error: run-batch --benchmark yam_real needs CAP_HARNESS_ISAAC_BRIDGE", file=sys.stderr)
++            return 2
++        if args.workers != 1:
++            print("error: one Isaac bridge runs one episode at a time; use --workers 1", file=sys.stderr)
++            return 2
+     results_jsonl = args.results_jsonl or args.output_root / "batch-results.jsonl"
+     summary_path = args.summary or args.output_root / "batch.json"
+ 
+diff --git a/src/cap_harness/run.py b/src/cap_harness/run.py
+index 58276b1..35edac3 100644
+--- a/src/cap_harness/run.py
++++ b/src/cap_harness/run.py
+@@ -78,11 +78,25 @@ def run_program(
+     init_mode: str = "saved",
+     flat_layout: bool = False,
+     capture_videos: bool = True,
+-    station: str = "yam-example",
++    station: str | None = None,
+     station_config_root: Path | None = None,
+     allow_motion: bool = False,
++    isaac_bridge: str | None = None,
+ ) -> RunOutcome:
+-    """Run an episode, using its task horizon when max_steps is not supplied."""
++    """Run an episode, using its task horizon when max_steps is not supplied.
++
++    ``isaac_bridge`` (``HOST:PORT``) swaps the yam_real station for a yamlab Isaac Sim
++    bridge; see :mod:`cap_harness.yam_real.isaac`. For yam_real, ``station`` and
++    ``isaac_bridge`` default to ``CAP_HARNESS_YAM_STATION`` / ``CAP_HARNESS_ISAAC_BRIDGE``,
++    so callers that do not know about them (run-batch workers, the campaign scripts)
++    reach the bridge once those are exported.
++    """
++    if station is None:
++        station = os.environ.get("CAP_HARNESS_YAM_STATION") or "yam-example"
++    if isaac_bridge is None and benchmark == "yam_real":
++        isaac_bridge = os.environ.get("CAP_HARNESS_ISAAC_BRIDGE") or None
++    if isaac_bridge is not None and benchmark != "yam_real":
++        raise ValueError("isaac_bridge is only supported for the yam_real benchmark")
+     if benchmark not in {"behavior", "libero-pro", "robosuite", "yam_real"}:
+         raise ValueError("benchmark must be behavior, libero-pro, robosuite, or yam_real")
+     if init_mode not in {"saved", "seeded"}:
+@@ -118,9 +132,16 @@ def run_program(
+         from .yam_real.adapter import YamRealAdapter
+         from .yam_real.registry import YamRealTaskRegistry
+ 
+-        registry = YamRealTaskRegistry()
++        if isaac_bridge is not None:
++            from .yam_real.isaac import ISAAC_TASKS, IsaacYamAdapter
++            from .yam_real.registry import YAM_REAL_TASKS
++
++            registry = YamRealTaskRegistry(YAM_REAL_TASKS + ISAAC_TASKS)
++            adapter_type = IsaacYamAdapter
++        else:
++            registry = YamRealTaskRegistry()
++            adapter_type = YamRealAdapter
+         metadata = registry.resolve(suite, task_id)
+-        adapter_type = YamRealAdapter
+         extension_allowlist = YAM_REAL_PUBLIC_TOOL_NAMES
+     else:
+         from cap_harness.registry import ROBOSUITE_PUBLIC_TOOL_NAMES
+@@ -245,7 +266,22 @@ def run_program(
+             }
+             if benchmark == "libero-pro":
+                 adapter_kwargs["init_mode"] = init_mode
+-            if benchmark == "yam_real":
++            if benchmark == "yam_real" and isaac_bridge is not None:
++                from .yam_real.isaac import build_isaac_station
++
++                host, _, port = isaac_bridge.rpartition(":")
++                # The bridge's arms are simulated: the motion gate guards hardware,
++                # and the Isaac client has no path to any.
++                adapter = adapter_type(
++                    build_isaac_station(
++                        station, config_root=station_config_root, host=host, port=int(port)
++                    ),
++                    registry=registry,
++                    run_observer=recorder,
++                    allow_physical_motion=True,
++                )
++                recorder.frequency = adapter.control_frequency
++            elif benchmark == "yam_real":
+                 from .yam_real.station import build_real_station
+ 
+                 adapter = adapter_type(

@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "benchmark": "yam_real",
+  "suite": "gear_assembly",
+  "task_id": 0,
+  "skill_library_sha": "91d636a706623f4e",
+  "consulted": [
+    {
+      "skill": "task-exploration.md",
+      "section": "Initial Scene Analysis",
+      "verdict": "useful",
+      "evidence": "snapshot + prompt probes on seed 51 gave the task language, cameras (top/wrist_left/wrist_right), base frame 'world' and the first working prompts ('light blue gear' 0.32, 'pin' ~0.25 per shaft) before any program was written"
+    },
+    {
+      "skill": "task-exploration.md",
+      "section": "Sandbox constraints when writing probes",
+      "verdict": "useful",
+      "evidence": "no program version crashed on sandbox rules (no RuntimeError/getattr/underscore names used); all 6 versions plus 7 probes ran program_ok"
+    },
+    {
+      "skill": "task-exploration.md",
+      "section": "Wrap every run in timeout",
+      "verdict": "useful",
+      "evidence": "every sweep chunk ran under timeout 590; the one chunk killed (v01 seeds 51-52 at 559 s/seed) left no orphan cap-harness process"
+    },
+    {
+      "skill": "localize.md",
+      "section": "Standard Localization Helper",
+      "verdict": "not-applicable",
+      "evidence": "localize_object returns one top-1 result; the gear prompt also matches the gear base, so the program iterates segment_text candidates and filters by projected extent instead"
+    },
+    {
+      "skill": "localize.md",
+      "section": "Disambiguation: Two Similar Objects in Scene",
+      "verdict": "useful",
+      "evidence": "the advice to filter candidates by projected 3D geometry before score worked: 'light blue gear' ranks the gear base 2nd (0.29 vs 0.32 on seed 51); an xy-extent band 1.5-7 cm selected the gear on all 10 seeds run"
+    },
+    {
+      "skill": "localize.md",
+      "section": "Prompting Strategy",
+      "verdict": "useful",
+      "evidence": "item 6 (ARM OCCLUSION) matched seed 54: the right arm at home hid one shaft (v00 'gear base with three shafts not found'); parking both arms first fixed it (seed 54 passes in v04/v05)"
+    },
+    {
+      "skill": "grasp.md",
+      "section": "Standard Pick-and-Place Template",
+      "verdict": "useful",
+      "evidence": "pre-grasp stand-off -> descend -> close -> lift skeleton reused for both the pick and the relay re-grasp; all 5 dev seeds in v04/v05"
+    },
+    {
+      "skill": "grasp.md",
+      "section": "Key Conventions",
+      "verdict": "misleading",
+      "evidence": "'Wrist vs fingertips' says a public Pose targets the grasp point between the fingertips (stated for LIBERO). On yam_real/yam-isaac I sized the top-down hub grasp as if the TCP were the fingertip line: a TCP 16 mm below the gear-hub top closed on the teeth 22.5 mm below it (jaw width 0.65-0.66 instead of 0.47-0.51 on the hub) and the gear jammed tilted on the shaft, seed 52 in v03. So the jaw contact reaches at least 6.5 mm below the YAM EE point. 10 mm depth fixed it (v04 5/5). The section needs a per-embodiment note."
+    },
+    {
+      "skill": "transport.md",
+      "section": "Pre-Probe IK Conditioning",
+      "verdict": "not-applicable",
+      "evidence": "mink IK on YAM was deterministic across calls; the failures were envelope limits (best configuration 3-29 cm from target), not branch flips"
+    },
+    {
+      "skill": "transport.md",
+      "section": "Basket / Container Placement",
+      "verdict": "useful",
+      "evidence": "'never call go_home() while holding' was followed: the program parks or homes only after open_gripper; no drops in transit on any of the 10 seeds"
+    },
+    {
+      "skill": "manipulation.md",
+      "section": "General Notes",
+      "verdict": "not-applicable",
+      "evidence": "peg-on-shaft insertion is a pick/place task here; no articulated objects"
+    }
+  ],
+  "proposed_edits": [
+    {
+      "skill": "grasp.md",
+      "section": "Key Conventions",
+      "change": "Under 'Wrist vs fingertips', add: 'On yam_real the jaw contact extends at least 6.5 mm BELOW the public EE point. Size the grasp depth from the object's own height step: on a hubbed gear (hub 22.5 mm above the teeth) a TCP 16 mm below the hub top closed on the teeth; 10 mm grasped the hub. Check the jaw width after close_gripper against the width of an earlier grasp of the same object.'",
+      "why": "v03 seed 52: 16 mm depth gave width 0.65-0.66 (teeth) and a jammed insertion; v04/v05 at 10 mm gave 0.41-0.52 (hub) and 5/5"
+    }
+  ],
+  "proposed_new": [
+    {
+      "skill": "localize.md",
+      "title": "Park bimanual YAM arms out of the overhead view before perceiving",
+      "trigger": "yam_real bimanual station, metric camera 'top': an object near either arm's home pose is partly hidden (fewer parts found than expected, e.g. 2 of 3 shafts). Cost: one move_to_joints per arm (~2-3 s wall, 2 motions of the episode budget), grippers empty. PARK_SWING_RAD 0.7 is the swing used on yam-isaac (arms end near y=+-0.47, z=0.91, clear of the wall).",
+      "code": "OUTWARD = {\"left\": 1.0, \"right\": -1.0}   # joint-0 sign that swings each YAM arm away from the table centre\nPARK_SWING_RAD = 0.7                       # swing used on yam-isaac; arms then sit near y=+-0.47, z=0.91\nhome_joints = get_robot_state().joint_positions   # read at program start, both arms at home\n\ndef park(arm):\n    target = [float(v) for v in home_joints[arm]]\n    target[0] = target[0] + OUTWARD[arm] * PARK_SWING_RAD\n    moved = move_to_joints(target, tolerance=0.02, max_steps=200, arm=arm)\n    return bool(moved.ok)\n\nfor arm_name in (\"left\", \"right\"):\n    park(arm_name)\nplate = segment_text(\"top\", \"gear base plate\")   # perceive only after both arms are parked",
+      "evidence": "yam_real/gear_assembly/task_0 seed 54: v00 failed 'gear base with three shafts not found' (right arm over the plate); with parking, 3 shafts found on all 10 seeds (5 dev + 5 unseen-check)"
+    },
+    {
+      "skill": "localize.md",
+      "title": "Find raised pins/shafts on a plate and select the middle one",
+      "trigger": "Goal names one of several identical pins/shafts standing on a plate ('the middle of the three shafts'). Segment the plate with prompt 'gear base plate' (fallback 'blue plate') on camera 'top', project with mask_to_point_cloud(..., target_frame=base_frame), and use surface_z = median z of that cloud (the plate top). min_rise 12 mm / join_r 15 mm suit ~10 mm pins about 30 mm tall spaced at least 4.5 cm apart. Reject a candidate unless exactly 3 clusters share a top height (max-min < 1 cm) at least 15 mm above surface_z, which also rejects the robot mounting plates.",
+      "code": "def raised_clusters(xs, ys, zs, surface_z, min_rise=0.012, join_r=0.015, min_pts=5):\n    order = sorted([i for i in range(len(zs)) if zs[i] > surface_z + min_rise], key=lambda i: -zs[i])\n    groups = []\n    for i in order:\n        home = None\n        for g in groups:\n            if math.hypot(xs[i] - g[\"sx\"], ys[i] - g[\"sy\"]) < join_r:\n                home = g\n                break\n        if home is None:\n            groups.append({\"sx\": xs[i], \"sy\": ys[i], \"m\": [i]})\n        else:\n            home[\"m\"].append(i)\n    out = []\n    for g in groups:\n        if len(g[\"m\"]) >= min_pts:\n            zmax = max(zs[i] for i in g[\"m\"])\n            top = [i for i in g[\"m\"] if zs[i] > zmax - 0.004]   # top disc only: side walls bias toward the camera\n            out.append({\"x\": sum(xs[i] for i in top) / len(top), \"y\": sum(ys[i] for i in top) / len(top), \"ztop\": zmax, \"n\": len(g[\"m\"])})\n    ranked = sorted([(-out[k][\"n\"], k) for k in range(len(out))])\n    return [out[k] for neg_n, k in ranked[:3]]\n\ndef middle_of_three(shafts):\n    pairs = [(math.hypot(shafts[i][\"x\"] - shafts[j][\"x\"], shafts[i][\"y\"] - shafts[j][\"y\"]), i, j) for i in range(3) for j in range(i + 1, 3)]\n    far = max(pairs)\n    return shafts[[k for k in range(3) if k != far[1] and k != far[2]][0]]",
+      "evidence": "found the 3 shafts and the correct middle one on all 10 seeds run (dev 51-55, unseen-check 66-70), including rotated plates (53, 54) and uneven spacing (seed 51: 7.6 cm / 4.5 cm)"
+    },
+    {
+      "skill": "grasp.md",
+      "title": "Grasp beyond the top-down envelope: tilted orientation search, then a table relay",
+      "trigger": "yam_real: solve_ik(backend='mink') of the top-down grasp fails ('best configuration is 0.03-0.16 m from the target') because the object is far from the shoulders, while the place step needs a vertical approach. Search pitch 90->30 deg and yaw 0/+-30 deg with an 8 cm stand-off along the approach axis. Gripper empty while searching. Cost: 2 IK calls per orientation (~0.02 s each, no ticks). If the result is not top-down, set the object down at a relay point that the inserting arm reaches top-down (search a grid around the midpoint of the two arms' home EE positions, at least 8 cm clear of other objects). Then park the arm, re-localize, and re-grasp top-down.",
+      "code": "def qmul(a, b):\n    return (a[0]*b[0]-a[1]*b[1]-a[2]*b[2]-a[3]*b[3], a[0]*b[1]+a[1]*b[0]+a[2]*b[3]-a[3]*b[2],\n            a[0]*b[2]-a[1]*b[3]+a[2]*b[0]+a[3]*b[1], a[0]*b[3]+a[1]*b[2]-a[2]*b[1]+a[3]*b[0])\n\nhome_q = {a: tuple(float(v) for v in get_robot_state().end_effector_poses[a].quaternion_wxyz) for a in (\"left\", \"right\")}\n\ndef tool_quat(arm, pitch_deg, yaw_deg):   # home tool points +x; pitch 90 = straight down\n    p = math.radians(pitch_deg) / 2.0\n    y = math.radians(yaw_deg) / 2.0\n    return qmul((math.cos(y), 0.0, 0.0, math.sin(y)), qmul((math.cos(p), 0.0, math.sin(p), 0.0), home_q[arm]))\n\ndef approach_dir(q):   # tool z axis in world\n    w, x, y, z = q\n    return (2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y))\n\ndef grasp_plan(arm, gx, gy, gz, stand_off=0.08):\n    for pitch, yaw in [(90, 0)] + [(p, y) for p in (75, 60, 45, 30) for y in (0, 30, -30)]:\n        q = tool_quat(arm, pitch, yaw)\n        a = approach_dir(q)\n        pre = (gx - stand_off * a[0], gy - stand_off * a[1], gz - stand_off * a[2])\n        if solve_ik(Pose((gx, gy, gz), q, get_robot_state().base_frame), arm=arm, backend=\"mink\").ok and \\\n           solve_ik(Pose(pre, q, get_robot_state().base_frame), arm=arm, backend=\"mink\").ok:\n            return {\"q\": q, \"pre\": pre, \"grasp\": (gx, gy, gz), \"pitch\": pitch}\n    return None",
+      "evidence": "dev seeds 51, 53, 54, 55 (gear out of top-down reach; picked at pitch 45-75 deg) and unseen-check 67, 68, 69 all passed through the relay; v00 (top-down only) 0/5"
+    },
+    {
+      "skill": "grasp.md",
+      "title": "Top-down grasp of a hubbed gear: hub-top centre, 10 mm deep",
+      "trigger": "Gear (or any part with a raised hub over a wider flange) lying flat, seen from the metric camera 'top', to be grasped top-down on yam_real. Prompt 'light blue gear' (the flat gear base also answers, so bound the projected extent at both ends). Measured on yam-isaac: hub top is the highest 2% of the cloud, teeth top 22.5 mm lower (radial z-profile from the hub centre). The jaw contacts at least 6.5 mm below the EE point, so a 16 mm depth closed on the teeth. Gripper empty on approach; one move_to_pose per segment (~3.7 s wall).",
+      "code": "seg = segment_text(\"top\", \"light blue gear\")\nbest = None\nfor cand in seg.segmentations[:8]:\n    cloud = mask_to_point_cloud(cand, \"top\", target_frame=get_robot_state().base_frame)\n    xs = sorted(float(p[0]) for p in cloud.points)\n    ys = sorted(float(p[1]) for p in cloud.points)\n    if len(xs) < 30:\n        continue\n    ext_x = xs[int(0.95 * (len(xs) - 1))] - xs[int(0.05 * (len(xs) - 1))]\n    ext_y = ys[int(0.95 * (len(ys) - 1))] - ys[int(0.05 * (len(ys) - 1))]\n    if 0.015 < ext_x < 0.07 and 0.015 < ext_y < 0.07 and (best is None or cand.score > best[0]):\n        best = (float(cand.score), cloud)   # bounded both ends: the 20 cm gear base also answers this prompt\nif best is None:\n    raise ValueError(\"gear not found\")\nzs = sorted(float(p[2]) for p in best[1].points)\nhub_top = zs[int(0.98 * (len(zs) - 1))]\ntop = [p for p in best[1].points if float(p[2]) > hub_top - 0.004]\ngear_x = sum(float(p[0]) for p in top) / len(top)    # centre of the hub's top face\ngear_y = sum(float(p[1]) for p in top) / len(top)\nHUB_GRASP_DEPTH = 0.010   # TCP below the hub top; 0.016 closed on the teeth 22.5 mm below the top\ngrasp_z = hub_top - HUB_GRASP_DEPTH",
+      "evidence": "v03 (16 mm): seed 52 failed (jaw width 0.66, gear jammed tilted). v04/v05 (10 mm): 5/5 dev, widths 0.41-0.52"
+    }
+  ]
+}
