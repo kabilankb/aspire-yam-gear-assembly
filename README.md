@@ -1,5 +1,8 @@
 # aspire-yam-gear-assembly
 
+https://github.com/user-attachments/assets/0c4f0029-2465-44e2-aa87-f55417e022cc
+
+
 Run [NVIDIA ASPIRE](https://github.com/NVlabs/ASPIRE) on YAM bimanual arms in Isaac Sim for a gear-insertion task.
 
 ASPIRE (agentic code-as-policies) has an AI agent write the robot's control program as Python. The agent runs it, reads the failures, fixes the code, and turns lessons that hold up into verified, reusable skills. This package connects ASPIRE's YAM station API to a simulated YAM in Isaac Lab, so the whole loop runs in simulation.
